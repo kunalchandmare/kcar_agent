@@ -1,0 +1,10 @@
+[project]
+name = "autosar-langgraph"
+version = "0.1.0"
+description = "Phase-1 AUTOSAR translator and spec-agent workflow."
+requires-python = ">=3.10"
+authors = [{ name = "Chandmare, Kunal" }]
+dependencies = ["pydantic>=2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
