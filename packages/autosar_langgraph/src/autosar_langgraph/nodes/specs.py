@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from autosar_langgraph.llm import StructuredLLM
 from autosar_langgraph.prompts import SPEC_AGENT_SYSTEM_PROMPT
-from autosar_langgraph.retrieval import SpecRetriever
+from autosar_langgraph.retrieval import SpecPdfNotFound, SpecRetriever
 from autosar_langgraph.state import AutosarState, CollectedSpecItem, SpecTarget
 
 logger = logging.getLogger(__name__)
@@ -80,8 +80,8 @@ def collect_specs_for_target(
             response_model=CollectedSpecItem,
         )
     except Exception as exc:
-        logger.warning("Spec extraction failed for %s: %s", validated.meta_model_element, exc)
-        raise SpecExtractionError(str(exc)) from exc
+        logger.warning("Spec LLM failed for %s; extracting from PDF chunks: %s", validated.meta_model_element, exc)
+        return _item_from_chunks(validated, chunks)
     if isinstance(extracted, CollectedSpecItem):
         return extracted
     return CollectedSpecItem.model_validate(extracted)
@@ -110,6 +110,11 @@ def specs_agent_node(
             target = raw_target if isinstance(raw_target, SpecTarget) else SpecTarget.model_validate(raw_target)
             item = collect_specs_for_target(target, retriever, llm)
             collected.append(item.model_dump())
+        except SpecPdfNotFound as exc:
+            logger.warning("Spec PDF not found: %s", exc)
+            errors.append(str(exc))
+            target = raw_target if isinstance(raw_target, SpecTarget) else SpecTarget.model_validate(raw_target)
+            collected.append(empty_spec_item(target, str(exc)).model_dump())
         except (ValidationError, SpecExtractionError) as exc:
             logger.warning("Skipping spec target: %s", exc)
             errors.append(str(exc))
@@ -156,3 +161,22 @@ def chunk_mandatory_attributes(chunks: list[str]) -> list[str]:
     """
     found = [match.strip() for match in _MANDATORY_PATTERN.findall("\n".join(chunks))]
     return list(dict.fromkeys(found))
+
+
+def _item_from_chunks(target: SpecTarget, chunks: list[str]) -> CollectedSpecItem:
+    """Extract a spec item from PDF chunks when the LLM is unavailable."""
+    related = [
+        line.strip()
+        for line in "\n".join(chunks).splitlines()
+        if "mapped to" in line.lower() or line.lower().startswith("see also")
+    ]
+    return CollectedSpecItem(
+        source_document=target.document,
+        release=target.autosar_release,
+        section=target.chapter_or_section or target.meta_model_element,
+        content_summary="Extracted from the specification PDF selected by the translator.",
+        raw_excerpt=chunks[0][:500],
+        constraints=chunk_constraints(chunks),
+        mandatory_attributes=chunk_mandatory_attributes(chunks),
+        related_requirements=related,
+    )

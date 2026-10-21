@@ -1,6 +1,7 @@
 """Phase-1 graph tests. They inject a fake LLM so Ollama is not required."""
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,8 @@ from pydantic import BaseModel  # noqa: E402
 
 from autosar_langgraph.graph import build_workflow, run_workflow  # noqa: E402
 from autosar_langgraph.nodes.specs import empty_spec_item  # noqa: E402
-from autosar_langgraph.retrieval import InMemorySpecRetriever, default_spec_chunks  # noqa: E402
+from autosar_langgraph.nodes.translator import normalize_translation  # noqa: E402
+from autosar_langgraph.retrieval import InMemorySpecRetriever, PdfSpecCatalog, default_spec_chunks  # noqa: E402
 from autosar_langgraph.state import (  # noqa: E402
     AutosarElement,
     CollectedSpecItem,
@@ -133,6 +135,33 @@ class RetrievalTests(unittest.TestCase):
         self.assertTrue(chunks)
         self.assertTrue(all("20-11" in chunk for chunk in chunks))
         self.assertFalse(any("R22-11" in chunk for chunk in chunks))
+
+    def test_catalog_picks_pdf_from_translator_document_and_release(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            chosen = Path(tmp) / "AUTOSAR_TPS_SystemTemplate_20-11.pdf"
+            other = Path(tmp) / "AUTOSAR_TPS_SystemTemplate_R22-11.pdf"
+            chosen.write_bytes(b"%PDF-1.4")
+            other.write_bytes(b"%PDF-1.4")
+            catalog = PdfSpecCatalog(tmp)
+            self.assertEqual(catalog.resolve("20-11", "SystemTemplate"), chosen)
+            self.assertEqual(catalog.resolve("R22-11", "AUTOSAR_TPS_SystemTemplate"), other)
+
+    def test_translator_fills_document_the_spec_agent_can_select(self) -> None:
+        result = TranslationResult(
+            elements=[
+                AutosarElement(
+                    name="VehicleSpeed",
+                    kind="SystemSignal",
+                    autosar_release="",
+                    spec_targets=[],
+                )
+            ]
+        )
+        normalized = normalize_translation(result, "20-11")
+        target = normalized.elements[0].spec_targets[0]
+        self.assertEqual(target.autosar_release, "20-11")
+        self.assertEqual(target.document, "AUTOSAR_TPS_SystemTemplate")
+        self.assertEqual(target.meta_model_element, "SystemSignal")
 
 
 class WorkflowTests(unittest.TestCase):

@@ -17,7 +17,12 @@ from autosar_langgraph.llm import OllamaStructuredLLM, StructuredLLM
 from autosar_langgraph.nodes.intent import intent_node
 from autosar_langgraph.nodes.specs import specs_agent_node
 from autosar_langgraph.nodes.translator import translator_node
-from autosar_langgraph.retrieval import InMemorySpecRetriever, SpecRetriever, default_spec_chunks
+from autosar_langgraph.retrieval import (
+    InMemorySpecRetriever,
+    PdfSpecCatalog,
+    SpecRetriever,
+    default_spec_chunks,
+)
 from autosar_langgraph.state import AutosarState
 
 logger = logging.getLogger(__name__)
@@ -87,6 +92,7 @@ def run_workflow(
     llm: Optional[StructuredLLM] = None,
     model: Optional[str] = None,
     base_url: Optional[str] = None,
+    specs_dir: Optional[str] = None,
 ) -> AutosarState:
     """
     Run the phase-1 graph on one user request.
@@ -98,12 +104,22 @@ def run_workflow(
         llm: Structured LLM. Defaults to a local Ollama model.
         model: Ollama model name, used only when llm is omitted.
         base_url: Ollama server URL, used only when llm is omitted.
+        specs_dir: Directory of specification PDFs. Used when retriever is omitted.
 
     Returns:
         The final LangGraph state.
     """
-    active_retriever = retriever if retriever is not None else InMemorySpecRetriever(default_spec_chunks())
+    active_retriever = _choose_retriever(retriever, specs_dir)
     active_llm = llm if llm is not None else OllamaStructuredLLM(model=model, base_url=base_url)
     app = build_workflow(active_llm, active_retriever)
     logger.info("Starting %s workflow", PHASE)
     return app.invoke(initial_state(user_request, requested_release))
+
+
+def _choose_retriever(retriever: Optional[SpecRetriever], specs_dir: Optional[str]) -> SpecRetriever:
+    """Use an injected retriever, otherwise the PDF catalog, otherwise the fixture."""
+    if retriever is not None:
+        return retriever
+    if specs_dir:
+        return PdfSpecCatalog(specs_dir)
+    return InMemorySpecRetriever(default_spec_chunks())

@@ -35,13 +35,14 @@ def intent_node(state: AutosarState, llm: StructuredLLM) -> dict[str, Any]:
             result = IntentResult.model_validate(result)
         intent = result.model_dump()
     except Exception as exc:
-        logger.warning("Intent LLM failed: %s", exc)
-        errors.append(f"intent_llm_failed: {exc}")
-        intent = None
+        logger.warning("Intent LLM failed; keeping the explicit release hint: %s", exc)
+        intent = {"request_type": "unknown", "entities": [], "autosar_release": hint, "notes": "LLM unavailable."}
+        if hint is None:
+            errors.append(f"intent_llm_failed: {exc}")
 
-    release = None
-    if isinstance(intent, dict):
-        release = intent.get("autosar_release") or hint
+    release = hint
+    if isinstance(intent, dict) and intent.get("autosar_release"):
+        release = intent["autosar_release"]
     return {
         "intent": intent,
         "requested_autosar_release": release,

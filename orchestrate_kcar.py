@@ -3,6 +3,7 @@
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional, Sequence
@@ -33,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Ollama server. Default: {DEFAULT_OLLAMA_BASE_URL}.",
     )
+    parser.add_argument(
+        "--specs-dir",
+        default=os.getenv("AUTOSAR_SPECS_DIR", "specs"),
+        help="Directory of specification PDFs. The spec agent picks a file from the translator output.",
+    )
     return parser
 
 
@@ -54,6 +60,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             requested_release=args.release,
             model=args.model,
             base_url=args.base_url,
+            specs_dir=args.specs_dir,
         )
     except ValueError as exc:
         logging.getLogger(__name__).error("%s", exc)

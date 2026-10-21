@@ -10,6 +10,7 @@ dependencies = [
   "langchain-ollama>=0.2",
   "pydantic>=2",
   "typing_extensions>=4.8",
+  "pymupdf>=1.24",
 ]
 
 [tool.setuptools.packages.find]
