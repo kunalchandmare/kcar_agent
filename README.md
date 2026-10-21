@@ -1,43 +1,30 @@
 # kcar_agent
 
-Agentic workflow that turns a plain-language AUTOSAR request into a version-aware model and the matching specification items.
+Phase 1 of an AUTOSAR agent workflow. Later phases (planner, ARXML generation, validation) are not built yet.
 
 ## Goal
 
-Help an AUTOSAR project start from a sentence instead of a meta-model form.
-
-1. Understand the request.
-2. Translate it into AUTOSAR elements for one release (for example `20-11` or `R22-11`).
-3. Collect the specification items for those elements: mandatory attributes, constraints, and related rules.
-
-Phase 1 stops there. It does not generate ARXML.
-
-The path is:
+Turn one plain-language request into a version-aware AUTOSAR state.
 
 ```text
 request -> intent -> translator -> spec agent -> JSON state
 ```
 
+LangGraph runs the nodes. Every node calls an LLM through Ollama. The spec agent only reads chunks for the release named in the request.
+
 ## Run
 
-Requires Python 3.10+ and `pydantic`.
+Ollama must already be running and the model must be pulled.
 
 ```bash
-pip install pydantic
+pip install -r requirements.txt
+ollama pull llama3.1
 python orchestrate_kcar.py "Create a Signal for vehicle speed, 16-bit, in AUTOSAR 20-11."
 ```
 
-Optional release override:
+Optional flags: `--release 20-11`, `--model llama3.1`, `--base-url http://127.0.0.1:11434`.
 
-```bash
-python orchestrate_kcar.py "Create a required port for VehicleSpeed" --release R22-11
-```
-
-The command prints one JSON object. Important fields:
-
-- `elements` — translated AUTOSAR elements
-- `spec_targets` — what the spec agent should look up
-- `collected_spec_items` — attributes and constraints that were found
+The same values can be set with `OLLAMA_MODEL` and `OLLAMA_BASE_URL`.
 
 ## Tests
 
@@ -45,15 +32,11 @@ The command prints one JSON object. Important fields:
 python -m unittest packages/autosar_langgraph/tests/test_workflow.py
 ```
 
-## Layout
+Tests use a fake LLM. They do not call Ollama.
 
-```text
-orchestrate_kcar.py
-packages/autosar_langgraph/src/autosar_langgraph/
-  graph.py          workflow
-  state.py          shared state
-  nodes/            intent, translator, spec agent
-  retrieval.py      release-filtered spec chunks
-```
+## Not in this phase
 
-The default run is offline. It uses a small built-in chunk set and a rule-based translator. A real LLM or vector store can be passed into `run_workflow`.
+- Action planner
+- ARXML or code generation
+- A validator
+- A full AUTOSAR document index (the retriever still uses a small built-in chunk set)

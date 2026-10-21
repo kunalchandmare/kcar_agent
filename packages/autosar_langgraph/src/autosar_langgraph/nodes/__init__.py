@@ -1,4 +1,4 @@
-"""Workflow nodes."""
+"""Phase-1 LangGraph nodes."""
 
 from autosar_langgraph.nodes.intent import intent_node
 from autosar_langgraph.nodes.specs import specs_agent_node

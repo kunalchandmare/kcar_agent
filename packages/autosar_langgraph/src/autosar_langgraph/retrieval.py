@@ -1,4 +1,8 @@
-"""Version-filtered retrieval of AUTOSAR specification chunks."""
+"""Version-filtered retrieval of AUTOSAR specification chunks.
+
+Phase 1 uses an in-memory list. TODO: replace it with a versioned vector index
+of the real AUTOSAR specifications once those documents are available.
+"""
 
 from dataclasses import dataclass
 from typing import Any, List, Protocol, Sequence

@@ -1,29 +1,51 @@
-"""Lightweight intent structuring before AUTOSAR translation."""
+"""Intent node: ask Ollama to structure the request, without translating it."""
 
-from autosar_langgraph.parsing import classify_request, detect_element_kinds, extract_release
-from autosar_langgraph.state import AutosarState
+import logging
+from typing import Any
+
+from autosar_langgraph.llm import StructuredLLM
+from autosar_langgraph.parsing import release_hint
+from autosar_langgraph.prompts import INTENT_SYSTEM_PROMPT
+from autosar_langgraph.state import AutosarState, IntentResult
+
+logger = logging.getLogger(__name__)
 
 
-def intent_node(state: AutosarState) -> AutosarState:
+def intent_node(state: AutosarState, llm: StructuredLLM) -> dict[str, Any]:
     """
-    Fill intent with request type, element kinds, and any explicit release.
+    Fill intent from the user request via the configured LLM.
 
     Args:
-        state: Current workflow state.
+        state: Current LangGraph state.
+        llm: Structured LLM, Ollama in production.
 
     Returns:
-        A new state whose intent and current_node are updated.
+        Partial state with intent, messages, and current_node.
     """
-    request = state.user_request
-    release = state.requested_autosar_release or extract_release(request)
-    kinds = [kind for kind, _document in detect_element_kinds(request)]
-    updated = state.model_copy(deep=True)
-    updated.intent = {
-        "request_type": classify_request(request),
-        "entities": kinds,
-        "autosar_release": release,
+    request = state["user_request"]
+    hint = state.get("requested_autosar_release") or release_hint(request)
+    errors = list(state.get("errors") or [])
+    try:
+        result = llm.extract(
+            system_prompt=INTENT_SYSTEM_PROMPT,
+            payload={"user_request": request, "release_hint": hint},
+            response_model=IntentResult,
+        )
+        if not isinstance(result, IntentResult):
+            result = IntentResult.model_validate(result)
+        intent = result.model_dump()
+    except Exception as exc:
+        logger.warning("Intent LLM failed: %s", exc)
+        errors.append(f"intent_llm_failed: {exc}")
+        intent = None
+
+    release = None
+    if isinstance(intent, dict):
+        release = intent.get("autosar_release") or hint
+    return {
+        "intent": intent,
+        "requested_autosar_release": release,
+        "errors": errors,
+        "messages": list(state.get("messages") or []) + [{"role": "user", "content": request}],
+        "current_node": "intent",
     }
-    updated.requested_autosar_release = release
-    updated.current_node = "intent"
-    updated.messages.append({"role": "user", "content": request})
-    return updated

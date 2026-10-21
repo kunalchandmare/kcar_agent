@@ -1,11 +1,12 @@
-"""Specification agent that collects version-specific AUTOSAR items."""
+"""Spec agent node: retrieve release-filtered chunks, then ask Ollama to extract them."""
 
 import logging
 import re
-from typing import List
+from typing import Any
 
 from pydantic import ValidationError
 
+from autosar_langgraph.llm import StructuredLLM
 from autosar_langgraph.prompts import SPEC_AGENT_SYSTEM_PROMPT
 from autosar_langgraph.retrieval import SpecRetriever
 from autosar_langgraph.state import AutosarState, CollectedSpecItem, SpecTarget
@@ -20,60 +21,43 @@ class SpecExtractionError(Exception):
     """Raised when specification extraction fails for one target."""
 
 
-def build_collected_spec_item(target: SpecTarget, chunks: List[str]) -> CollectedSpecItem:
+def empty_spec_item(target: SpecTarget, summary: str) -> CollectedSpecItem:
     """
-    Build a spec item from retrieved chunks without calling an LLM.
+    Build an explicit not-found item. The model is not asked to guess.
 
     Args:
-        target: Specification target that produced the chunks.
-        chunks: Retrieved specification text. May be empty.
+        target: Specification target that produced no usable chunks.
+        summary: Reason shown to the caller.
 
     Returns:
-        A CollectedSpecItem. Empty input yields an explicit not-found summary.
+        A CollectedSpecItem with empty constraint lists.
     """
-    if not chunks:
-        return CollectedSpecItem(
-            source_document=target.document,
-            release=target.autosar_release,
-            section=target.chapter_or_section,
-            content_summary="No matching specification content found.",
-        )
-
-    combined = "\n".join(chunks)
-    constraints = _unique(_CONSTRAINT_PATTERN.findall(combined))
-    mandatory = _unique(match.strip() for match in _MANDATORY_PATTERN.findall(combined))
-    related = _related_lines(combined)
-    summary = _summary(chunks)
     return CollectedSpecItem(
         source_document=target.document,
         release=target.autosar_release,
         section=target.chapter_or_section,
         content_summary=summary,
-        raw_excerpt=chunks[0][:500],
-        constraints=constraints,
-        mandatory_attributes=mandatory,
-        related_requirements=related,
     )
 
 
 def collect_specs_for_target(
     target: SpecTarget,
     retriever: SpecRetriever,
-    llm_client: object | None = None,
+    llm: StructuredLLM,
 ) -> CollectedSpecItem:
     """
-    Retrieve relevant chunks and extract a CollectedSpecItem for one SpecTarget.
+    Retrieve chunks for one target and extract a CollectedSpecItem with the LLM.
 
     Args:
-        target: The specification target produced by the Translator.
+        target: Specification target produced by the Translator.
         retriever: Component that returns version-filtered chunks.
-        llm_client: Optional LLM interface used for structured extraction.
+        llm: Structured LLM. Called only when chunks exist.
 
     Returns:
         A CollectedSpecItem populated from the retrieved content.
 
     Raises:
-        SpecExtractionError: When the LLM client fails after chunks were retrieved.
+        SpecExtractionError: When the LLM fails after chunks were retrieved.
     """
     validated = target if isinstance(target, SpecTarget) else SpecTarget.model_validate(target)
     chunks = retriever.search(
@@ -82,11 +66,11 @@ def collect_specs_for_target(
         meta_model_element=validated.meta_model_element,
         keywords=validated.keywords,
     )
-    if not chunks or llm_client is None or not hasattr(llm_client, "extract"):
-        return build_collected_spec_item(validated, chunks)
+    if not chunks:
+        return empty_spec_item(validated, "No matching specification content found.")
 
     try:
-        extracted = llm_client.extract(  # type: ignore[attr-defined]
+        extracted = llm.extract(
             system_prompt=SPEC_AGENT_SYSTEM_PROMPT,
             payload={
                 "target": validated.model_dump(),
@@ -106,74 +90,69 @@ def collect_specs_for_target(
 def specs_agent_node(
     state: AutosarState,
     retriever: SpecRetriever,
-    llm_client: object | None = None,
-) -> AutosarState:
+    llm: StructuredLLM,
+) -> dict[str, Any]:
     """
     Fill collected_spec_items from spec_targets.
 
     Args:
-        state: Current workflow state containing spec_targets.
+        state: Current LangGraph state containing spec_targets.
         retriever: Spec chunk retriever.
-        llm_client: Optional LLM client for extraction.
+        llm: Structured LLM, Ollama in production.
 
     Returns:
-        Updated state with collected_spec_items populated.
+        Partial state with collected_spec_items and current_node.
     """
-    updated = state.model_copy(deep=True)
-    collected: List[CollectedSpecItem] = []
+    collected: list[dict[str, Any]] = []
+    errors = list(state.get("errors") or [])
     for raw_target in _targets_from_state(state):
         try:
             target = raw_target if isinstance(raw_target, SpecTarget) else SpecTarget.model_validate(raw_target)
-            collected.append(collect_specs_for_target(target, retriever, llm_client))
+            item = collect_specs_for_target(target, retriever, llm)
+            collected.append(item.model_dump())
         except (ValidationError, SpecExtractionError) as exc:
             logger.warning("Skipping spec target: %s", exc)
-            updated.errors.append(str(exc))
-    updated.collected_spec_items = collected
-    updated.current_node = "specs_agent"
-    return updated
+            errors.append(str(exc))
+    return {
+        "collected_spec_items": collected,
+        "errors": errors,
+        "current_node": "specs_agent",
+    }
 
 
-def _targets_from_state(state: AutosarState) -> List[SpecTarget]:
+def _targets_from_state(state: AutosarState) -> list[Any]:
     """Prefer aggregated spec_targets, otherwise read them from elements."""
-    if state.spec_targets:
-        return list(state.spec_targets)
-    targets: List[SpecTarget] = []
-    for element in state.elements:
-        targets.extend(element.spec_targets)
+    if state.get("spec_targets"):
+        return list(state["spec_targets"])
+    targets: list[Any] = []
+    for element in state.get("elements") or []:
+        targets.extend(element.get("spec_targets") or [])
     return targets
 
 
-def _summary(chunks: List[str]) -> str:
-    """Use the first descriptive lines as a short summary."""
-    lines = []
-    for line in chunks[0].splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("[release=") or stripped.endswith("]"):
-            continue
-        if stripped.startswith(("-", "*")) or stripped.lower() in {"attributes:", "constraints:", "related:"}:
-            continue
-        lines.append(stripped)
-        if len(lines) == 2:
-            break
-    return " ".join(lines) if lines else "Specification chunks were retrieved."
+def chunk_constraints(chunks: list[str]) -> list[str]:
+    """
+    Read constraint lines from retrieved chunks. Test helper and prompt context.
+
+    Args:
+        chunks: Retrieved specification text.
+
+    Returns:
+        Unique constraint lines, in order.
+    """
+    found = _CONSTRAINT_PATTERN.findall("\n".join(chunks))
+    return list(dict.fromkeys(found))
 
 
-def _related_lines(text: str) -> List[str]:
-    """Collect short 'see also' or mapping sentences."""
-    related = []
-    for line in text.splitlines():
-        lowered = line.lower()
-        if "mapped to" in lowered or lowered.startswith("see also"):
-            related.append(line.strip())
-    return _unique(related)
+def chunk_mandatory_attributes(chunks: list[str]) -> list[str]:
+    """
+    Read lines marked mandatory in retrieved chunks.
 
+    Args:
+        chunks: Retrieved specification text.
 
-def _unique(items: List[str]) -> List[str]:
-    """Preserve order while dropping duplicates."""
-    seen = set()
-    unique: List[str] = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            unique.append(item)
-    return unique
+    Returns:
+        Unique mandatory attribute lines, in order.
+    """
+    found = [match.strip() for match in _MANDATORY_PATTERN.findall("\n".join(chunks))]
+    return list(dict.fromkeys(found))

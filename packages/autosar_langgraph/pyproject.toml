@@ -1,10 +1,16 @@
 [project]
 name = "autosar-langgraph"
 version = "0.1.0"
-description = "Phase-1 AUTOSAR translator and spec-agent workflow."
+description = "Phase-1 AUTOSAR LangGraph workflow backed by Ollama."
 requires-python = ">=3.10"
 authors = [{ name = "Chandmare, Kunal" }]
-dependencies = ["pydantic>=2"]
+dependencies = [
+  "langgraph>=0.2",
+  "langchain-core>=0.3",
+  "langchain-ollama>=0.2",
+  "pydantic>=2",
+  "typing_extensions>=4.8",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

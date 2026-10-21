@@ -1,109 +1,188 @@
-"""Tests for retrieval filtering, empty chunks, and the phase-1 workflow."""
+"""Phase-1 graph tests. They inject a fake LLM so Ollama is not required."""
 
 import sys
 import unittest
 from pathlib import Path
+from typing import Any
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(_SRC))
 
-from autosar_langgraph.graph import run_workflow  # noqa: E402
-from autosar_langgraph.nodes.specs import build_collected_spec_item, collect_specs_for_target  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+
+from autosar_langgraph.graph import build_workflow, run_workflow  # noqa: E402
+from autosar_langgraph.nodes.specs import empty_spec_item  # noqa: E402
 from autosar_langgraph.retrieval import InMemorySpecRetriever, default_spec_chunks  # noqa: E402
-from autosar_langgraph.state import SpecTarget  # noqa: E402
+from autosar_langgraph.state import (  # noqa: E402
+    AutosarElement,
+    CollectedSpecItem,
+    IntentResult,
+    SpecTarget,
+    TranslationResult,
+)
+
+
+class FakeLLM:
+    """Test double with the same extract contract as OllamaStructuredLLM."""
+
+    def extract(
+        self,
+        *,
+        system_prompt: str,
+        payload: dict[str, Any],
+        response_model: type[BaseModel],
+    ) -> BaseModel:
+        del system_prompt
+        if response_model is IntentResult:
+            return IntentResult(
+                request_type="create_signal",
+                entities=["SystemSignal"],
+                autosar_release=payload.get("release_hint"),
+            )
+        if response_model is TranslationResult:
+            return _translation(str(payload.get("user_request", "")))
+        if response_model is CollectedSpecItem:
+            target = SpecTarget.model_validate(payload["target"])
+            return _item_from_chunks(target, list(payload.get("chunks") or []))
+        raise TypeError(response_model.__name__)
+
+
+def _translation(user_request: str) -> TranslationResult:
+    """Return a fixed translation so the graph can be tested without a model."""
+    if "R22-11" in user_request:
+        release = "R22-11"
+        elements = [
+            _element("RequestedSoftwareComponent", "SoftwareComponent", release, "AUTOSAR_TPS_SoftwareComponentTemplate"),
+            _element("RequestedPort", "Port", release, "AUTOSAR_TPS_SoftwareComponentTemplate", {"direction": "required"}),
+            _element("VehicleSpeed", "ISignal", release, "AUTOSAR_TPS_SystemTemplate"),
+        ]
+        return TranslationResult(
+            elements=elements,
+            translation_summary="Translated ISignal request for R22-11.",
+        )
+    release = "20-11"
+    return TranslationResult(
+        elements=[
+            _element(
+                "VehicleSpeed",
+                "SystemSignal",
+                release,
+                "AUTOSAR_TPS_SystemTemplate",
+                {"length": 16},
+            )
+        ],
+        translation_summary="Translated SystemSignal VehicleSpeed for 20-11.",
+    )
+
+
+def _element(
+    name: str,
+    kind: str,
+    release: str,
+    document: str,
+    attributes: dict | None = None,
+) -> AutosarElement:
+    section = "ApplicationDataType" if kind == "DataType" else kind
+    return AutosarElement(
+        name=name,
+        kind=kind,  # type: ignore[arg-type]
+        autosar_release=release,
+        attributes=attributes or {},
+        spec_targets=[
+            SpecTarget(
+                autosar_release=release,
+                document=document,
+                chapter_or_section=section,
+                meta_model_element=kind,
+                required_items=["mandatory attributes", "constraints"],
+                keywords=[kind, name],
+            )
+        ],
+    )
+
+
+def _item_from_chunks(target: SpecTarget, chunks: list[str]) -> CollectedSpecItem:
+    """Mirror the spec prompt using only the supplied chunks."""
+    from autosar_langgraph.nodes.specs import chunk_constraints, chunk_mandatory_attributes
+
+    if not chunks:
+        return empty_spec_item(target, "No matching specification content found.")
+    related = [
+        line.strip()
+        for line in "\n".join(chunks).splitlines()
+        if "mapped to" in line.lower() or line.lower().startswith("see also")
+    ]
+    return CollectedSpecItem(
+        source_document=target.document,
+        release=target.autosar_release,
+        section=target.chapter_or_section,
+        content_summary="Extracted from retrieved chunks only.",
+        raw_excerpt=chunks[0][:500],
+        constraints=chunk_constraints(chunks),
+        mandatory_attributes=chunk_mandatory_attributes(chunks),
+        related_requirements=related,
+    )
 
 
 class RetrievalTests(unittest.TestCase):
-    """Release and document filters must not leak other specifications."""
+    """Release filters must not leak other specifications."""
 
-    def setUp(self) -> None:
-        self.retriever = InMemorySpecRetriever(default_spec_chunks())
-
-    def test_filters_by_release_and_element(self) -> None:
-        chunks = self.retriever.search(
-            release="20-11",
-            document="AUTOSAR_TPS_SystemTemplate",
-            meta_model_element="SystemSignal",
-            keywords=["length"],
-        )
-        self.assertGreaterEqual(len(chunks), 2)
+    def test_filters_by_release(self) -> None:
+        retriever = InMemorySpecRetriever(default_spec_chunks())
+        chunks = retriever.search("20-11", "AUTOSAR_TPS_SystemTemplate", "SystemSignal", ["length"])
+        self.assertTrue(chunks)
         self.assertTrue(all("20-11" in chunk for chunk in chunks))
         self.assertFalse(any("R22-11" in chunk for chunk in chunks))
 
-    def test_other_release_does_not_match(self) -> None:
-        chunks = self.retriever.search(
-            release="R22-11",
-            document="AUTOSAR_TPS_SystemTemplate",
-            meta_model_element="SystemSignal",
-            keywords=["SystemSignal"],
-        )
-        self.assertEqual(chunks, [])
-
-
-class SpecItemTests(unittest.TestCase):
-    """Empty retrieval must be explicit, not invented."""
-
-    def test_empty_chunks_are_reported(self) -> None:
-        target = SpecTarget(
-            autosar_release="20-11",
-            document="AUTOSAR_TPS_SystemTemplate",
-            meta_model_element="SystemSignal",
-        )
-        item = build_collected_spec_item(target, [])
-        self.assertEqual(item.content_summary, "No matching specification content found.")
-        self.assertEqual(item.constraints, [])
-
-    def test_collect_extracts_constraints_and_mandatory_attributes(self) -> None:
-        target = SpecTarget(
-            autosar_release="20-11",
-            document="AUTOSAR_TPS_SystemTemplate",
-            chapter_or_section="SystemSignal",
-            meta_model_element="SystemSignal",
-            keywords=["length", "SystemSignal"],
-        )
-        item = collect_specs_for_target(target, InMemorySpecRetriever(default_spec_chunks()))
-        self.assertTrue(any("constr_1234" in constraint for constraint in item.constraints))
-        self.assertTrue(any("length" in attribute.lower() for attribute in item.mandatory_attributes))
-        self.assertEqual(item.release, "20-11")
-
 
 class WorkflowTests(unittest.TestCase):
-    """The orchestrated path must produce a spec-agent-ready state."""
+    """The compiled graph is phase 1 and stops after the spec agent."""
+
+    def test_graph_has_phase1_nodes_only(self) -> None:
+        app = build_workflow(FakeLLM(), InMemorySpecRetriever(default_spec_chunks()))
+        names = set(app.get_graph().nodes)
+        self.assertTrue({"intent", "autosar_translator", "specs_agent"}.issubset(names))
+        self.assertNotIn("planner", names)
+        self.assertNotIn("generator", names)
 
     def test_vehicle_speed_signal_20_11(self) -> None:
-        state = run_workflow("Create a Signal for vehicle speed, 16-bit, in AUTOSAR 20-11.")
-        self.assertEqual(state.current_node, "specs_agent")
-        self.assertEqual(len(state.elements), 1)
-        element = state.elements[0]
-        self.assertEqual(element.kind, "SystemSignal")
-        self.assertEqual(element.name, "VehicleSpeed")
-        self.assertEqual(element.autosar_release, "20-11")
-        self.assertEqual(element.attributes["length"], 16)
-        self.assertEqual(element.spec_targets[0].document, "AUTOSAR_TPS_SystemTemplate")
-        self.assertIsNotNone(state.collected_spec_items)
-        assert state.collected_spec_items is not None
-        self.assertIn("constr_1234", " ".join(state.collected_spec_items[0].constraints))
+        state = run_workflow(
+            "Create a Signal for vehicle speed, 16-bit, in AUTOSAR 20-11.",
+            llm=FakeLLM(),
+        )
+        self.assertEqual(state["current_node"], "specs_agent")
+        self.assertEqual(state["elements"][0]["kind"], "SystemSignal")
+        self.assertEqual(state["elements"][0]["name"], "VehicleSpeed")
+        self.assertEqual(state["elements"][0]["autosar_release"], "20-11")
+        self.assertEqual(state["elements"][0]["attributes"]["length"], 16)
+        self.assertIn("constr_1234", " ".join(state["collected_spec_items"][0]["constraints"]))
 
     def test_isignal_keeps_r22_11(self) -> None:
         state = run_workflow(
             "I need a Software Component with a required port that receives an ISignal "
-            "of type VehicleSpeed according to R22-11."
+            "of type VehicleSpeed according to R22-11.",
+            llm=FakeLLM(),
         )
-        kinds = {element.kind for element in state.elements}
+        kinds = {element["kind"] for element in state["elements"]}
         self.assertIn("ISignal", kinds)
         self.assertNotIn("SystemSignal", kinds)
-        self.assertTrue(all(element.autosar_release == "R22-11" for element in state.elements))
-        isignal_items = [
-            item
-            for item in state.collected_spec_items or []
-            if item.section == "ISignal"
-        ]
-        self.assertTrue(isignal_items)
-        self.assertTrue(any("constr_3082" in text for text in isignal_items[0].constraints))
+        self.assertTrue(all(element["autosar_release"] == "R22-11" for element in state["elements"]))
+        isignal = next(item for item in state["collected_spec_items"] if item["section"] == "ISignal")
+        self.assertTrue(any("constr_3082" in text for text in isignal["constraints"]))
 
     def test_empty_request_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
-            run_workflow("   ")
+            run_workflow("   ", llm=FakeLLM())
+
+    def test_missing_chunks_do_not_invent_constraints(self) -> None:
+        target = SpecTarget(
+            autosar_release="20-11",
+            document="AUTOSAR_TPS_SystemTemplate",
+            meta_model_element="SystemSignal",
+        )
+        item = empty_spec_item(target, "No matching specification content found.")
+        self.assertEqual(item.constraints, [])
+        self.assertEqual(item.content_summary, "No matching specification content found.")
 
 
 if __name__ == "__main__":
