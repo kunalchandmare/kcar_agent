@@ -146,6 +146,13 @@ class RetrievalTests(unittest.TestCase):
             self.assertEqual(catalog.resolve("20-11", "SystemTemplate"), chosen)
             self.assertEqual(catalog.resolve("R22-11", "AUTOSAR_TPS_SystemTemplate"), other)
 
+    def test_single_system_template_pdf_is_used_without_release_in_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            only = Path(tmp) / "AUTOSAR_TPS_SystemTemplate.pdf"
+            only.write_bytes(b"%PDF-1.4")
+            catalog = PdfSpecCatalog(tmp)
+            self.assertEqual(catalog.resolve("20-11", "AUTOSAR_TPS_SystemTemplate"), only)
+
     def test_translator_fills_document_the_spec_agent_can_select(self) -> None:
         result = TranslationResult(
             elements=[

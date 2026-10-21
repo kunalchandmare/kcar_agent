@@ -330,7 +330,13 @@ class PdfSpecCatalog:
         """
         wanted_doc = canonical_document(document)
         wanted_release = release.strip()
-        return self._index.get((wanted_release, wanted_doc))
+        exact = self._index.get((wanted_release, wanted_doc))
+        if exact is not None:
+            return exact
+        same_document = [path for (found_release, found_doc), path in self._index.items() if found_doc == wanted_doc]
+        if len(same_document) == 1:
+            return same_document[0]
+        return None
 
     def search(
         self,
@@ -455,7 +461,7 @@ def _ids_from_path(path: Path, specs_dir: Path) -> tuple[str, str]:
     match = re.match(r"(.+?)_((?:R)?\d{2}-\d{2}|\d+\.\d+\.\d+)$", stem, re.IGNORECASE)
     if match:
         return _normalize_release(match.group(2)), match.group(1)
-    return "", stem
+    return "*", stem
 
 
 def _looks_like_release(value: str) -> bool:
